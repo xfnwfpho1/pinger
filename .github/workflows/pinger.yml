@@ -1,0 +1,63 @@
+# pinger — the FSM heartbeat of last resort (rung 4, T46/W-C3 F-3).
+#
+# WHY THIS REPO EXISTS (the design's adjudication, T46-WC-DESIGN v2 F-3):
+#   - Cross-repo repository_dispatch needs a PAT (X1 physics — GITHUB_TOKEN
+#     only crosses the anti-recursion line for SAME-repo dispatches).
+#   - quiet-lab is zero-secrets BY CONSTRAINT — it cannot hold the PAT.
+#   - Same-org cron is the CORRELATED failure class (X5) — an org-wide
+#     event (billing pause, Actions incident) kills the org's schedules and
+#     the watchdog together.
+#   - THIS user-account public repo gives: free minutes (public), a
+#     genuinely de-correlated schedule (separate account's cron), and a PAT
+#     secret posture identical to xfnwfpho1/mirror-runner (already holds
+#     one). The chain's own GITHUB_TOKEN self-tick stays the LIVING
+#     heartbeat; this is the 15-min backstop that revives a dead chain.
+#
+# Physics, stated honestly (the X5 datum): GHA schedules cold-start ~3.6h
+# and fire sparsely (~2h apart vs the 15-min nominal) — nominal 15min
+# means EFFECTIVE 15min-2h. That is still the only uncorrelated source;
+# rung 3 (the executor daemon duties, 6-8 fires/day) and rung 5 (the
+# operator, via alerts) sit above and below it.
+#
+# The payload keys on `reason` (L2-M4: `note` is invisible to run names
+# and duty scans; `reason` is what everything keys on). X24's criterion:
+# the fsm-lab run named "pinger · conductor" + a journal tick-pinger-<ms>.
+name: pinger
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: pinger
+  cancel-in-progress: false
+
+permissions:
+  contents: read   # nothing else — this repo holds no code worth writing
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping fsm-lab
+        env:
+          PINGER_PAT: ${{ secrets.PINGER_PAT }}
+        run: |
+          set -uo pipefail
+          for i in 1 2 3; do
+            code=$(curl -s -o /tmp/ping-body -w '%{http_code}' -X POST \
+              -H "Authorization: token ${PINGER_PAT}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "User-Agent: fsm-pinger" \
+              https://api.github.com/repos/claudecode-headless/fsm-lab/dispatches \
+              -d '{"event_type":"fsm-tick","client_payload":{"reason":"pinger"}}')
+            if [ "$code" = "204" ]; then
+              echo "PING-OK (attempt $i, 204) — fsm-lab tick dispatched"
+              exit 0
+            fi
+            echo "PING-ATTEMPT-$i HTTP=$code body=$(head -c 200 /tmp/ping-body)"
+            sleep $((i * 5))
+          done
+          echo "PING-FAILED after 3 attempts (the chain's own self-tick and the executor duties remain the primary drivers; rung 5 sees this in the watch-the-watcher duty)"
+          exit 1
